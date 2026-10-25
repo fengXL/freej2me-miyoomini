@@ -4,6 +4,7 @@
 #include <SDL2/SDL_mixer.h>
 #include <unordered_map>
 #include <set>
+#include <mutex>
 #include "org_recompile_mobile_SdlMixerManager.h"
 
 #define DEFAULT_BGM_FREQ    44100
@@ -48,6 +49,12 @@ struct NativeContext {
 
 // 全局映射表：Mix_Music指针 → NativeContext指针
 static std::unordered_map<jlong, NativeContext*> g_contextMap;
+
+// JNI入口互斥锁：游戏线程(加载/播放/释放)与EOM轮询线程并发进入，
+// unordered_map等共享结构必须串行化；用递归锁因为轮询线程会在持锁回调Java
+// (onPlaybackComplete→resumeStackedMusic→start)时重入PlayMusic等入口。
+// musicFinished钩子在SDL音频线程，绝不取锁(避免与Mix_LockAudio互死)，只做volatile写。
+static std::recursive_mutex g_lock;
 
 // 音效通道分配：chunk句柄 → 通道号；已占用通道集合
 static std::unordered_map<jlong, int> g_chunkChannel;
@@ -143,6 +150,7 @@ void musicFinished() {
  */
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerUpdate
   (JNIEnv *env, jobject obj) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
 
 	// 看门狗：句柄在而流已死。注意Mix_PlayingMusic()对暂停中的音乐也返回0
 	// （其内部是music_active），必须先排除我们主动暂停的情况，否则会把游戏暂停的音乐"补活"
@@ -247,6 +255,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlHaptic
  */
 JNIEXPORT jlong JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerLoadMidi
   (JNIEnv *env, jobject obj, jstring filePath, jobject player) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
 
     if (filePath == NULL) {
         fprintf(stderr, "文件路径为空\n");
@@ -307,6 +316,7 @@ JNIEXPORT jlong JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerLoadMi
  */
 JNIEXPORT jlong JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerLoadWav
   (JNIEnv *env, jobject obj, jstring filePath) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
 
     if (filePath == NULL) {
         fprintf(stderr, "文件路径为空\n");
@@ -361,6 +371,7 @@ JNIEXPORT jlong JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerLoadWa
  */
 JNIEXPORT jint JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPlayMusic
   (JNIEnv *env, jobject obj, jlong musicHandle, jint loops) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
 
     if (musicHandle == 0) {
         fprintf(stderr, "无效的音乐句柄\n");
@@ -407,6 +418,7 @@ JNIEXPORT jint JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPlayMus
  */
 JNIEXPORT jint JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPlayWav
   (JNIEnv *env, jobject obj, jlong musicHandle, jint loops) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
 
     if (musicHandle == 0) {
         fprintf(stderr, "无效的音效句柄\n");
@@ -440,6 +452,7 @@ JNIEXPORT jint JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPlayWav
  */
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPauseMusic
   (JNIEnv *env, jobject obj, jlong musicHandle) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
     if (musicHandle != 0 && musicHandle == currentMusicHandle) {
         Mix_PauseMusic();
         g_musicPaused = 1;
@@ -449,6 +462,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPauseMu
 
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPauseWav
   (JNIEnv *env, jobject obj, jlong musicHandle) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
     auto it = g_chunkChannel.find(musicHandle);
     if (it != g_chunkChannel.end()) {
         Mix_Pause(it->second);
@@ -462,6 +476,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPauseWa
  */
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerResumeMusic
   (JNIEnv *env, jobject obj, jlong musicHandle) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
     if (musicHandle != 0 && musicHandle == currentMusicHandle) {
         Mix_ResumeMusic();
         g_musicPaused = 0;
@@ -471,6 +486,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerResumeM
 
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerResumeWav
   (JNIEnv *env, jobject obj, jlong musicHandle) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
     auto it = g_chunkChannel.find(musicHandle);
     if (it != g_chunkChannel.end()) {
         Mix_Resume(it->second);
@@ -484,6 +500,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerResumeW
  */
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerStopMusic
   (JNIEnv *env, jobject obj, jlong musicHandle) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
     if (musicHandle != 0 && musicHandle == currentMusicHandle) {
         Mix_HaltMusic();
         suppressFinished(musicHandle);
@@ -496,6 +513,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerStopMus
 
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerStopWav
   (JNIEnv *env, jobject obj, jlong musicHandle) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
     auto it = g_chunkChannel.find(musicHandle);
     if (it != g_chunkChannel.end()) {
         Mix_HaltChannel(it->second);
@@ -508,6 +526,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerStopWav
  */
 JNIEXPORT jboolean JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerIsPlaying
   (JNIEnv *env, jobject obj, jlong musicHandle) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
     if (musicHandle != 0 && musicHandle == currentMusicHandle) {
         return (Mix_PlayingMusic() == 1) ? JNI_TRUE : JNI_FALSE;
     }
@@ -516,6 +535,7 @@ JNIEXPORT jboolean JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerIsP
 
 JNIEXPORT jboolean JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerIsPlayingWav
   (JNIEnv *env, jobject obj, jlong musicHandle) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
     auto it = g_chunkChannel.find(musicHandle);
     if (it != g_chunkChannel.end()) {
         return Mix_Playing(it->second) ? JNI_TRUE : JNI_FALSE;
@@ -528,6 +548,7 @@ JNIEXPORT jboolean JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerIsP
  */
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerSetVolume
   (JNIEnv *env, jobject obj, jint volume) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
 	volume = 128*volume/100;
 
     if (volume < 0) volume = 0;
@@ -545,6 +566,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerSetVolu
 
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerSetVolumeWav
   (JNIEnv *env, jobject obj, jlong musicHandle, jint volume) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
 	volume = 128*volume/100;
 
     if (volume < 0) volume = 0;
@@ -563,6 +585,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerSetVolu
  */
 JNIEXPORT jint JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerGetVolume
   (JNIEnv *env, jobject obj) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
     return Mix_VolumeMusic(-1);  // -1表示只查询不设置
 }
 
@@ -571,6 +594,7 @@ JNIEXPORT jint JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerGetVolu
  */
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerFreeMusic
   (JNIEnv *env, jobject obj, jlong musicHandle) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
 
     if (musicHandle == 0) {
         return;
@@ -605,6 +629,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerFreeMus
 
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerFreeWav
   (JNIEnv *env, jobject obj, jlong musicHandle) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
 
     if (musicHandle == 0) {
         return;
@@ -629,6 +654,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerFreeWav
  */
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerQuit
   (JNIEnv *env, jclass cls) {
+	std::lock_guard<std::recursive_mutex> __lk(g_lock);
 
     // 停止所有播放
     Mix_HaltMusic();

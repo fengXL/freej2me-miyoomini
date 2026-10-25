@@ -310,7 +310,7 @@ public class PlatformPlayer implements Player
 
 		public void start()
 		{
-			if(manager == null) { return; }
+			if(manager == null) { SdlMixerManager.audioLog("DBG start忽略: manager==null " + bgmFileName); return; }
 
 			if(currentMusicHandle==0)
 			{
@@ -330,6 +330,7 @@ public class PlatformPlayer implements Player
 			{
 				manager.sdlMixerResumeMusic(currentMusicHandle);
 			}
+			SdlMixerManager.audioLog("DBG music.start: seek=" + seekToStart + " isOpen=" + isOpen + " playing=" + manager.sdlMixerIsPlaying(currentMusicHandle) + " " + bgmFileName);
 
 			if(seekToStart || !isOpen || !manager.sdlMixerIsPlaying(currentMusicHandle))
 			{

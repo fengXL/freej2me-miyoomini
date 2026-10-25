@@ -135,6 +135,8 @@ public class Display
 	{
 		try
 		{
+			System.out.println("[lcd] setCurrent -> " + next.getClass().getName());
+			org.recompile.mobile.SdlMixerManager.audioLog("lcd切换 " + next.getClass().getName());
 			next.showNotify();
 			current = next;
 			current.notifySetCurrent();

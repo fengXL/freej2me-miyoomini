@@ -57,6 +57,7 @@ public class SystemMenu
 	public void setVisible(boolean v)
 	{
 		visible = v;
+		org.recompile.mobile.SdlMixerManager.audioLog(v ? "系统菜单 打开" : "系统菜单 关闭");
 		System.out.println("系统菜单: " + (v ? "打开" : "关闭"));
 		if (listener != null) listener.requestRepaint();
 	}
