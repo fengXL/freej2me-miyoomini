@@ -107,6 +107,96 @@ public class SdlMixerManager{
     // music播完事件轮询线程
     private static Thread pollThread = null;
 
+    // 句柄缓存：缓存文件路径 -> {句柄, 引用计数}。
+    // 游戏引擎常为同一段音频反复创建Player（每次createPlayer都会新分配chunk+通道），
+    // 按内容共享后，通道/内存占用只与"不同声音的数量"相关，与Player创建次数无关，
+    // 从结构上杜绝游玩过程中通道被缓慢漏光。
+    private static final java.util.Map<String, long[]> handleCache =
+            new java.util.concurrent.ConcurrentHashMap<String, long[]>();
+
+    /**
+     * 获取（或共享）一份WAV音效句柄，引用计数+1
+     */
+    public static synchronized long acquireWav(String path) {
+        long[] rec = handleCache.get(path);
+        if (rec != null) { rec[1]++; return rec[0]; }
+        SdlMixerManager m = new SdlMixerManager();
+        long h = m.sdlMixerLoadWav(path);
+        if (h <= 0) { return h; }
+        handleCache.put(path, new long[]{h, 1});
+        return h;
+    }
+
+    /**
+     * 引用计数-1，归零时释放chunk并归还通道
+     */
+    public static synchronized void releaseWav(String path, long handle) {
+        if (handle <= 0) { return; }
+        SdlMixerManager m = new SdlMixerManager();
+        long[] rec = handleCache.get(path);
+        if (rec == null || rec[0] != handle) {
+            // 不在缓存中（旧路径），直接释放
+            m.sdlMixerStopWav(handle);
+            m.sdlMixerFreeWav(handle);
+            return;
+        }
+        if (--rec[1] <= 0) {
+            handleCache.remove(path);
+            m.sdlMixerStopWav(handle);
+            m.sdlMixerFreeWav(handle);
+        }
+    }
+
+    /**
+     * 获取（或共享）一份music句柄（Mix_LoadMUS解析结果较占内存，同样按内容共享）
+     */
+    public static synchronized long acquireMusic(String path, PlatformPlayer.sdlPlayer player) {
+        long[] rec = handleCache.get(path);
+        if (rec != null) { rec[1]++; return rec[0]; }
+        SdlMixerManager m = new SdlMixerManager();
+        long h = m.sdlMixerLoadMidi(path, player);
+        if (h <= 0) { return h; }
+        handleCache.put(path, new long[]{h, 1});
+        return h;
+    }
+
+    public static synchronized void releaseMusic(String path, long handle) {
+        if (handle <= 0) { return; }
+        SdlMixerManager m = new SdlMixerManager();
+        long[] rec = handleCache.get(path);
+        if (rec == null || rec[0] != handle) {
+            m.sdlMixerStopMusic(handle);
+            m.sdlMixerFreeMusic(handle);
+            return;
+        }
+        if (--rec[1] <= 0) {
+            handleCache.remove(path);
+            m.sdlMixerStopMusic(handle);
+            m.sdlMixerFreeMusic(handle);
+        }
+    }
+
+    // 轻量音频日志：落到运行目录audio.log，便于真机排障（stdout在设备上丢失）。
+    // 超过256KB时清空一次，避免长会话撑爆SD卡。
+    private static java.io.FileWriter audioLogWriter = null;
+
+    public static void audioLog(String msg) {
+        try {
+            java.io.File f = new java.io.File("./audio.log");
+            if (f.length() > 256 * 1024) { closeLog(); f.delete(); }
+            if (audioLogWriter == null) {
+                audioLogWriter = new java.io.FileWriter(f.getAbsolutePath(), true);
+            }
+            audioLogWriter.write(System.currentTimeMillis() + " " + msg + "\r\n");
+            audioLogWriter.flush();
+        } catch (Throwable t) { }
+    }
+
+    private static void closeLog() {
+        try { if (audioLogWriter != null) { audioLogWriter.close(); } } catch (Throwable t) { }
+        audioLogWriter = null;
+    }
+
     /**
      * 全局初始化音频系统
      */
@@ -200,8 +290,10 @@ public class SdlMixerManager{
 				try { pollThread.join(500); } catch (InterruptedException e) { }
 				pollThread = null;
 			}
+			handleCache.clear();
 			sdlMixerQuit();
 		}
+		closeLog();
         System.out.println("✓ [java]SDL2_mixer已关闭");
     }
 }

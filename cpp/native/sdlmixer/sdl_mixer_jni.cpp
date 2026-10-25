@@ -26,6 +26,10 @@ static SDL_Haptic *haptic = NULL;
 // 在SDL音频回调线程里直接回调Java，游戏监听器再调播放API会死锁整个音频线程
 static volatile jlong g_finishedHandle = 0;
 
+// 我们自己pause的music标记：Mix_PlayingMusic()对暂停中的音乐返回0（内部是music_active），
+// 看门狗需要区分"暂停"与"流死亡"，不依赖SDL各版本Paused语义
+static volatile int g_musicPaused = 0;
+
 // 主音量(0-128)：同时作用于music和音效通道；每个音效句柄另有游戏设定的期望音量
 static int g_masterVolume = 128;
 static std::unordered_map<jlong, int> g_chunkVolume;
@@ -128,13 +132,28 @@ void musicFinished() {
 	g_finishedHandle = currentMusicHandle;
 	currentMusicHandle = 0;
 	currentMusic = NULL;
+	g_musicPaused = 0;
 }
 
 /**
- * Java轮询线程调用：转发music自然播完事件到对应Java播放器
+ * Java轮询线程调用：转发music自然播完事件到对应Java播放器。
+ * 兼做死流看门狗：currentMusicHandle非0但Mix_PlayingMusic()==0，
+ * 说明流已终止而后端没有触发finished回调（无限循环BGM被悄悄杀死），
+ * 补发结束事件让Java侧决定恢复/重启。
  */
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerUpdate
   (JNIEnv *env, jobject obj) {
+
+	// 看门狗：句柄在而流已死。注意Mix_PlayingMusic()对暂停中的音乐也返回0
+	// （其内部是music_active），必须先排除我们主动暂停的情况，否则会把游戏暂停的音乐"补活"
+	if (g_finishedHandle == 0 && currentMusicHandle != 0
+		&& Mix_PlayingMusic() == 0 && g_musicPaused == 0) {
+		jlong dead = currentMusicHandle;
+		currentMusicHandle = 0;
+		currentMusic = NULL;
+		g_finishedHandle = dead;
+		fprintf(stderr, "音乐看门狗: 流已终止(句柄%lld)，补发结束事件\n", (long long)dead);
+	}
 
 	jlong finished = g_finishedHandle;
 	if (finished == 0) { return; }
@@ -349,15 +368,16 @@ JNIEXPORT jint JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPlayMus
     }
 
     Mix_Music* music = (Mix_Music*)(intptr_t)musicHandle;
-	currentMusic = music;
 
-    // 停止当前播放（Mix_HaltMusic会触发musicFinished置标志，需抑制掉这次"被顶掉"）
+    // 停止当前播放（Mix_HaltMusic会触发musicFinished置标志，需抑制掉这次"被顶掉"）。
+    // 切换期间currentMusicHandle保持0：避免sdlMixerUpdate的看门狗在间隙里误判
     jlong oldHandle = currentMusicHandle;
     if (oldHandle != 0 && oldHandle != musicHandle) {
         Mix_HaltMusic();
         suppressFinished(oldHandle);
     }
-    currentMusicHandle = musicHandle;
+    currentMusic = NULL;
+    currentMusicHandle = 0;
 
 	if(loops!=-1)
 	{
@@ -374,6 +394,9 @@ JNIEXPORT jint JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPlayMus
         CHECK_MIX_ERROR("Mix_PlayMusic");
         return -1;
     }
+    currentMusic = music;
+    currentMusicHandle = musicHandle;
+    g_musicPaused = 0;
 
     printf("🎵 播放开始 (loops=%d)\n", loops);
     return 0;
@@ -419,6 +442,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPauseMu
   (JNIEnv *env, jobject obj, jlong musicHandle) {
     if (musicHandle != 0 && musicHandle == currentMusicHandle) {
         Mix_PauseMusic();
+        g_musicPaused = 1;
         printf("⏸ 音乐已暂停\n");
     }
 }
@@ -440,6 +464,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerResumeM
   (JNIEnv *env, jobject obj, jlong musicHandle) {
     if (musicHandle != 0 && musicHandle == currentMusicHandle) {
         Mix_ResumeMusic();
+        g_musicPaused = 0;
         printf("▶ 音乐已恢复\n");
     }
 }
@@ -464,6 +489,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerStopMus
         suppressFinished(musicHandle);
         currentMusicHandle = 0;
         currentMusic = NULL;
+        g_musicPaused = 0;
         printf("⏹ 音乐已停止\n");
     }
 }
@@ -556,6 +582,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerFreeMus
         suppressFinished(musicHandle);
         currentMusicHandle = 0;
         currentMusic = NULL;
+        g_musicPaused = 0;
     }
 
 	auto it = g_contextMap.find(musicHandle);
@@ -612,6 +639,7 @@ JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerQuit
     g_usedChannels.clear();
     g_chunkVolume.clear();
     g_finishedHandle = 0;
+    g_musicPaused = 0;
     currentMusicHandle = 0;
     currentMusic = NULL;
 

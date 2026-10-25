@@ -294,9 +294,9 @@ public class PlatformPlayer implements Player
 				SdlMixerManager.init();
 
 				manager = new SdlMixerManager();
-				currentMusicHandle = manager.sdlMixerLoadMidi(bgmFileName, this);
+				currentMusicHandle = SdlMixerManager.acquireMusic(bgmFileName, this);
 				if (currentMusicHandle == -1) {
-					System.err.println("❌ 加载音频文件失败: " + bgmFileName);
+					SdlMixerManager.audioLog("music加载失败 " + bgmFileName);
 					currentMusicHandle = 0;
 				} else if (currentMusicHandle != 0) {
 					registerMusicPlayer(this);
@@ -314,14 +314,14 @@ public class PlatformPlayer implements Player
 
 			if(currentMusicHandle==0)
 			{
-				currentMusicHandle =  manager.sdlMixerLoadMidi(bgmFileName, this);
+				currentMusicHandle = SdlMixerManager.acquireMusic(bgmFileName, this);
 				if (currentMusicHandle > 0) {
 					registerMusicPlayer(this);
 				}
 			}
 
 			if (currentMusicHandle == -1 || currentMusicHandle == 0) {
-				System.err.println("❌ 加载音频文件失败: " + bgmFileName);
+				SdlMixerManager.audioLog("music播放失败(未加载) " + bgmFileName);
 				return;
 			}
 
@@ -337,9 +337,9 @@ public class PlatformPlayer implements Player
 				if (result == 0) {
 					isOpen = true;
 					seekToStart = false;
-					System.out.println("🎵 开始播放: " + bgmFileName);
+					SdlMixerManager.audioLog("music播放 " + bgmFileName + " loops=" + loops);
 				} else {
-					System.err.println("❌ 播放失败");
+					SdlMixerManager.audioLog("music播放失败 " + bgmFileName);
 					return;
 				}
 			}
@@ -357,14 +357,16 @@ public class PlatformPlayer implements Player
 			}
 			state = Player.PREFETCHED;
 			notifyListeners(PlayerListener.STOPPED, 0);
+			// 单music流：本曲暂停后流就静了。真机上此时别的仍在STARTED的Player还在响
+			// （例如被本曲顶掉的BGM），代为恢复，避免"事件音乐暂停后BGM永久消失"
+			resumeStackedMusic(this);
 		}
 
 		public void deallocate()
 		{
 			unregisterMusicPlayer(this);
-			if (manager != null && currentMusicHandle != 0) {
-				manager.sdlMixerStopMusic(currentMusicHandle);//先halt
-				manager.sdlMixerFreeMusic(currentMusicHandle);//再释放
+			if (currentMusicHandle != 0) {
+				SdlMixerManager.releaseMusic(bgmFileName, currentMusicHandle);
 				currentMusicHandle = 0;
 			}
 
@@ -394,12 +396,22 @@ public class PlatformPlayer implements Player
 
 		public void onPlaybackComplete()
 		{
+			SdlMixerManager.audioLog("music自然播完 " + bgmFileName + " loops=" + loops);
+
 			// 单music流：若本曲曾把别的BGM顶掉、而游戏并未显式stop它（真机多Player可叠播，
 			// 游戏以为BGM还在响），先代为恢复，再通知本曲END_OF_MEDIA（游戏监听器重播可正常接管）
-			resumeStackedMusic(this);
+			boolean resumedOther = resumeStackedMusic(this);
 
 			if(state == Player.STARTED) { state = Player.PREFETCHED; }
 			notifyListeners(PlayerListener.END_OF_MEDIA, 0);
+
+			// 无限循环的BGM不应自然结束；若后端悄悄终止了流（没有任何结束回调），
+			// 由native看门狗补发本事件，这里代游戏重启它
+			if(!resumedOther && loops == -1 && state != Player.CLOSED)
+			{
+				SdlMixerManager.audioLog("看门狗: 重启被后端终止的循环BGM " + bgmFileName);
+				start();
+			}
 		}
 
 		// 供注册表判断：游戏视角里这个播放器是否还在STARTED（没有被stop/deallocate过）
@@ -428,8 +440,9 @@ public class PlatformPlayer implements Player
 		}
 	}
 
-	// 找一个仍处于STARTED（游戏没stop/deallocate过）的music播放器并重启它
-	private static void resumeStackedMusic(sdlPlayer finished)
+	// 找一个仍处于STARTED（游戏没stop/deallocate过）且当前不在发声的music播放器并重启它。
+	// 返回是否恢复了某个播放器。
+	private static boolean resumeStackedMusic(sdlPlayer finished)
 	{
 		sdlPlayer candidate = null;
 		synchronized (activeMusic) {
@@ -437,13 +450,19 @@ public class PlatformPlayer implements Player
 				sdlPlayer p = activeMusic.get(i);
 				if (p == finished) { continue; }
 				if (p.manager == null || p.currentMusicHandle == 0) { continue; }
-				if (p.isStarted()) { candidate = p; break; }
+				if (!p.isStarted()) { continue; }
+				// 已在当前流上发声的不动它（例如本曲stop时顶上的正是它）
+				if (p.manager.sdlMixerIsPlaying(p.currentMusicHandle)) { continue; }
+				candidate = p;
+				break;
 			}
 		}
 		if (candidate != null) {
-			System.out.println("🎵 恢复被顶掉的BGM");
+			SdlMixerManager.audioLog("恢复被顶掉的BGM " + candidate.bgmFileName);
 			candidate.start();
+			return true;
 		}
+		return false;
 	}
 
 
@@ -474,9 +493,9 @@ public class PlatformPlayer implements Player
 				SdlMixerManager.init();
 
 				manager = new SdlMixerManager();
-				currentMusicHandle = manager.sdlMixerLoadWav(bgmFileName);
+				currentMusicHandle = SdlMixerManager.acquireWav(bgmFileName);
 				if (currentMusicHandle == -1) {
-					System.err.println("❌ 加载音效文件失败: " + bgmFileName);
+					SdlMixerManager.audioLog("sfx加载失败(通道耗尽?) " + bgmFileName);
 					currentMusicHandle = 0;
 				}
 
@@ -492,11 +511,14 @@ public class PlatformPlayer implements Player
 
 			if(currentMusicHandle==0)
 			{
-				currentMusicHandle =  manager.sdlMixerLoadWav(bgmFileName);
+				currentMusicHandle = SdlMixerManager.acquireWav(bgmFileName);
+				if (currentMusicHandle == -1) {
+					SdlMixerManager.audioLog("sfx加载失败(通道耗尽?) " + bgmFileName);
+					currentMusicHandle = 0;
+				}
 			}
 
 			if (currentMusicHandle == -1 || currentMusicHandle == 0) {
-				System.err.println("❌ 加载音效文件失败: " + bgmFileName);
 				return;
 			}
 
@@ -507,7 +529,7 @@ public class PlatformPlayer implements Player
 			if (result == 0) {
 				isOpen = true;
 			} else {
-				System.err.println("❌ 音效播放失败");
+				SdlMixerManager.audioLog("sfx播放失败 " + bgmFileName);
 				return;
 			}
 
@@ -528,9 +550,8 @@ public class PlatformPlayer implements Player
 
 		public void deallocate()
 		{
-			if (manager != null && currentMusicHandle != 0) {
-				manager.sdlMixerStopWav(currentMusicHandle);//先halt
-				manager.sdlMixerFreeWav(currentMusicHandle);//再释放
+			if (currentMusicHandle != 0) {
+				SdlMixerManager.releaseWav(bgmFileName, currentMusicHandle);
 				currentMusicHandle = 0;
 			}
 
