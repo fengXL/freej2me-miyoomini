@@ -25,6 +25,7 @@ along with FreeJ2ME.  If not, see http://www.gnu.org/licenses/
 
 #include <iostream>
 #include <pthread.h>
+#include <stdarg.h>
 #include <SDL2/SDL.h>
 #include "cJSON.h"
 
@@ -215,6 +216,25 @@ void tick()
 	}
 	
 	
+}
+
+// 按键事件调试日志：记录收到的原始SDL事件到 ./sdl_keys.log
+// (用于排查设备按键编号/事件类型不匹配的问题, 事件低频不会写爆)
+static FILE* keylog = NULL;
+void logEvent(const char* fmt, ...)
+{
+	if(keylog == NULL)
+	{
+		keylog = fopen("sdl_keys.log", "a");
+		if(keylog == NULL) return;
+		fprintf(keylog, "---- session ----\n");
+	}
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(keylog, fmt, ap);
+	va_end(ap);
+	fputc('\n', keylog);
+	fflush(keylog);
 }
 
 void sendKey(int key, bool pressed)
@@ -559,8 +579,127 @@ int jaxis2key(SDL_Event event)
 	{
 		return M_R2;
 	}
-	
+
 	return SDLK_x;
+}
+
+// 记录hat每个方向的按下状态（斜方向=组合值，四个方向独立跟踪）
+static bool hatDirState[4] = {false, false, false, false};
+
+// 发送方向键事件（含旋转重映射、鼠标模式移动），方向之间互不影响，支持斜方向同时按下
+void sendDirKey(int btn, bool pressed)
+{
+	j_btn = btn;
+	joyButtons[btn].isPressed = pressed;
+
+	int key = btn;
+	if(btn==M_UP)
+	{
+		key=SDLK_UP;
+		if(rotate==1)
+		{
+			key=SDLK_RIGHT;
+		}
+		else if(rotate==2)
+		{
+			key=SDLK_LEFT;
+		}
+	}
+	else if(btn==M_DOWN)
+	{
+		key=SDLK_DOWN;
+		if(rotate==1)
+		{
+			key=SDLK_LEFT;
+		}
+		else if(rotate==2)
+		{
+			key=SDLK_RIGHT;
+		}
+	}
+	else if(btn==M_LEFT)
+	{
+		key=SDLK_LEFT;
+		if(rotate==1)
+		{
+			key=SDLK_UP;
+		}
+		else if(rotate==2)
+		{
+			key=SDLK_DOWN;
+		}
+	}
+	else if(btn==M_RIGHT)
+	{
+		key=SDLK_RIGHT;
+		if(rotate==1)
+		{
+			key=SDLK_DOWN;
+		}
+		else if(rotate==2)
+		{
+			key=SDLK_UP;
+		}
+	}
+
+	if(use_mouse && pressed)
+	{
+		updateMouse(key);
+	}
+
+	if(!use_mouse)
+	{
+		sendKey(key, pressed);
+	}
+}
+
+// hat事件：按位掩码比较每个方向的前后状态，变化时各自发送press/release
+// （旧实现只认四个单一方向值，斜方向组合值被当作"全部释放"，导致无法斜向移动）
+void handleHatMotion(int hat, int value)
+{
+	const int dirs[4] = { SDL_HAT_UP, SDL_HAT_DOWN, SDL_HAT_LEFT, SDL_HAT_RIGHT };
+	const int btns[4] = { M_UP, M_DOWN, M_LEFT, M_RIGHT };
+
+	for(int i=0; i<4; i++)
+	{
+		bool now = (value & dirs[i]) != 0;
+		if(now != hatDirState[i])
+		{
+			hatDirState[i] = now;
+			sendDirKey(btns[i], now);
+		}
+	}
+}
+
+// 十字键作为摇杆轴(axis 0/1)的处理：部分固件把D-pad报为两轴模拟输入
+// 阈值触发+方向状态跟踪，同样支持斜方向（两轴独立）
+#define AXIS_DEADZONE 16000
+static int axisDirState[2] = {0, 0}; // axis0水平(-1左/1右), axis1垂直(-1上/1下)
+void handleAxisMotion(int axis, int value)
+{
+	if(axis > 1) return; // 只处理方向轴
+
+	int dir = 0;
+	if(value < -AXIS_DEADZONE) dir = -1;
+	else if(value > AXIS_DEADZONE) dir = 1;
+
+	if(dir == axisDirState[axis]) return;
+
+	logEvent("AXIS%d %d -> %d (raw=%d)", axis, axisDirState[axis], dir, value);
+	axisDirState[axis] = dir;
+
+	if(axis == 0) // 水平轴
+	{
+		if(dir < 0) { sendDirKey(M_RIGHT, false); sendDirKey(M_LEFT, true); }
+		else if(dir > 0) { sendDirKey(M_LEFT, false); sendDirKey(M_RIGHT, true); }
+		else { sendDirKey(M_LEFT, false); sendDirKey(M_RIGHT, false); }
+	}
+	else // 垂直轴
+	{
+		if(dir < 0) { sendDirKey(M_DOWN, false); sendDirKey(M_UP, true); }
+		else if(dir > 0) { sendDirKey(M_UP, false); sendDirKey(M_DOWN, true); }
+		else { sendDirKey(M_UP, false); sendDirKey(M_DOWN, false); }
+	}
 }
 
 void *startCapturing(void *args)
@@ -585,54 +724,9 @@ void *startCapturing(void *args)
 					
 					
 				case SDL_JOYHATMOTION:
-					//printf("jhat.hat:%x jhat.value:%x event.key.state:%d \n",event.jhat.hat, event.jhat.value, event.key.state);
-					//fflush(stdout);
-					
-					if ( event.jhat.value == SDL_HAT_UP )
-					{
-						event.type=SDL_JOYBUTTONDOWN;
-						event.jbutton.button=M_UP;
-						event.jbutton.state = SDL_PRESSED;
-						
-					}
-					
-					else if ( event.jhat.value == SDL_HAT_DOWN )
-					{
-						
-						event.type=SDL_JOYBUTTONDOWN;
-						event.jbutton.button=M_DOWN;
-						event.jbutton.state = SDL_PRESSED;
-					}
-					
-					else if ( event.jhat.value == SDL_HAT_LEFT )
-					{
-						
-						event.type=SDL_JOYBUTTONDOWN;
-						event.jbutton.button=M_LEFT;
-						event.jbutton.state = SDL_PRESSED;
-					}
-					
-					else if ( event.jhat.value == SDL_HAT_RIGHT )
-					{
-						
-						event.type=SDL_JOYBUTTONDOWN;
-						event.jbutton.button=M_RIGHT;
-						event.jbutton.state = SDL_PRESSED;
-					}
-					
-					else
-					{
-						event.type=SDL_JOYBUTTONUP;
-						event.jbutton.button=j_btn;
-						event.jbutton.state = SDL_RELEASED;
-						
-						
-						joyButtons[M_UP].isPressed=false;
-						joyButtons[M_DOWN].isPressed=false;
-						joyButtons[M_LEFT].isPressed=false;
-						joyButtons[M_RIGHT].isPressed=false;
-						
-					}
+				logEvent("HAT hat=%d val=0x%x", event.jhat.hat, event.jhat.value);
+				handleHatMotion(event.jhat.hat, event.jhat.value);
+				break;
 
 				case SDL_JOYBUTTONDOWN:
 				case SDL_JOYBUTTONUP:
@@ -648,20 +742,13 @@ void *startCapturing(void *args)
 					}
 				
 				
+					logEvent("BTN %d %s", event.jbutton.button, event.jbutton.state==SDL_PRESSED?"down":"up");
 					int key = event.jbutton.button;
 					
-					if (key == M_QUIT1) {
-						capturing = false;
-						sendKey(-1, true);
+					if (key == M_QUIT1 || key == M_QUIT2) {
+						// MENU键：呼出/关闭Java端系统菜单（退出游戏在菜单里操作）
+						sendKey(SDLK_F1, event.jbutton.state == SDL_PRESSED);
 						fflush(stderr);
-						//continue;
-						break;
-					}
-					if (key == M_QUIT2) {
-						capturing = false;
-						sendKey(-1, true);
-						fflush(stderr);
-						//continue;
 						break;
 					}
 					
@@ -808,7 +895,7 @@ void *startCapturing(void *args)
 						
 						if(mod && event.type == SDL_JOYBUTTONDOWN)
 						{
-							key=SDLK_c;//英文c,发送到java,作为切换按键模式的信号
+							key=SDLK_F1;//SELECT+START 呼出/关闭系统菜单(切换键位功能已移入菜单)
 							mod=0;
 							ignore=1;
 						}
@@ -849,6 +936,11 @@ void *startCapturing(void *args)
 				
 				case SDL_JOYAXISMOTION:
 				{
+					if(event.jaxis.axis <= 1)
+					{
+						handleAxisMotion(event.jaxis.axis, event.jaxis.value);
+						break;
+					}
 					printf("SDL_JOYAXISMOTION:event type 0x%x axis:%d value:%d\n",event.type,event.jaxis.axis, event.jaxis.value);
 					fflush(stdout);
 					
@@ -877,6 +969,15 @@ void *startCapturing(void *args)
 					fflush(stdout);
 					
 					int key = event.key.keysym.sym;
+					logEvent("KEY sym=0x%x %s", key, event.key.state==SDL_PRESSED?"down":"up");
+					// 键盘事件路径的菜单键(部分固件把MENU/GUIDE报成键盘键码)
+					if(key == SDLK_MENU && event.key.state == SDL_PRESSED)
+					{
+						sendKey(SDLK_F1, true);
+						sendKey(SDLK_F1, false);
+						fflush(stderr);
+						break;
+					}
 					if(key==SDLK_UP)//上
 					{
 						if(rotate==1)
@@ -950,6 +1051,7 @@ void *startCapturing(void *args)
 				
 				default:
 					printf("未知事件:event type 0x%x \n",event.type);
+					logEvent("UNKNOWN type=0x%x", event.type);
 					fflush(stdout);
 				
 				

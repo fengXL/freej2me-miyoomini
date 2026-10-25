@@ -67,6 +67,13 @@ public class Anbu
 	private final SDLConfig  config;
 	private int fps=16;
 	private int showfps=0;
+
+	// 系统菜单
+	private SystemMenu menu;
+	private java.awt.image.BufferedImage menuCanvas;
+	private final Object paintLock = new Object();
+	// 十字键映射：true=导航键(手机方向键), false=数字键2468
+	private boolean dpadNav = false;
 	
 	private static java.awt.Font globalFont=null;
 
@@ -207,6 +214,38 @@ public class Anbu
 		config = new SDLConfig();
 		config.init(appname+lcdWidth+lcdHeight);
 		settingsChanged();
+
+		// 全局音量生效（config里的sound设置此前从未应用到混音器）
+		try
+		{
+			soundLevel = Integer.parseInt(config.settings.get("sound"));
+		}
+		catch (Exception e) { soundLevel = 100; }
+		org.recompile.mobile.SdlMixerManager.setMasterVolume(soundLevel);
+
+		// 系统菜单（MENU键呼出）
+		menuCanvas = new BufferedImage(lcdWidth, lcdHeight, BufferedImage.TYPE_INT_ARGB);
+		menu = new SystemMenu(config, new SystemMenu.Listener()
+		{
+			public void onSettingChanged()
+			{
+				settingsChanged();
+				showfps = 0; // 显示当前键位模式字母
+			}
+
+			public void onExitGame()
+			{
+				Mobile.destroy();
+				sdl.stop();
+				org.recompile.mobile.SdlMixerManager.shutdown();
+				System.exit(0);
+			}
+
+			public void requestRepaint()
+			{
+				paintFrame();
+			}
+		});
 		
 		//au.start(soundLevel);
 		//canvas=new BufferedImage(lcdWidth, lcdHeight, BufferedImage.TYPE_INT_ARGB);
@@ -214,131 +253,9 @@ public class Anbu
 
 		painter = new Runnable()
 		{
-			
 			public void run()
 			{
-				try
-				{
-					long last=fps-System.currentTimeMillis()-pretime;
-					if(last>0)
-					{
-						Thread.sleep(last);
-					}
-					
-					pretime=System.currentTimeMillis();
-					//System.out.println("cur time2：" + pretime);
-					
-					
-					/*String output;
-					//System.out.println(">>>sdl interface err");
-					while (sdl.processErrorOutput.ready() && (output = sdl.processErrorOutput.readLine()) != null) {
-						System.out.println(output);
-					}
-					//System.out.println("sdl interface err<<<"); */
-					
-					
-					/*
-					while (au.processErrorOutput.ready() && (output = au.processErrorOutput.readLine()) != null) {
-						System.out.println(output);
-					} */
-					
-
-					
-					// Send Frame to SDL interface
-					
-					
-					
-					int[] data= new int[lcdWidth* lcdHeight];
-					byte[] frame = new byte[lcdWidth* lcdHeight * 2];
-					
-					Mobile.getPlatform().getLCD().getRGB(0, 0, lcdWidth, lcdHeight, data, 0, lcdWidth);
-					
-					//gc.drawImage(Mobile.getPlatform().getLCD(), 0, 0, lcdWidth, lcdHeight, null);
-					//int[] data=canvas.getRGB(0, 0, lcdWidth, lcdHeight, null, 0, lcdWidth);
-					
-					
-					
-					
-					byte R,G,B;
-					short tmp;
-					
-					for(int i = 0; i < data.length; i++)
-					{
-						R = (byte)(data[i] >> 16);
-						G = (byte)(data[i] >> 8);
-						B = (byte)(data[i]);
-						
-						R = (byte)(R>>3);
-						G = (byte)(G>>2);
-						B = (byte)(B>>3);
-						tmp = (short) ( R << 11 & 0xF800
-								| G << 5 & 0x07E0
-								| B & 0x001f);
-
-						frame[2*i]= (byte) (tmp&0x00FF);
-						frame[2*i+1]= (byte) ((tmp>>8)&0x00FF);
-					}
-					
-					
-					if(showfps<60)
-					{
-						int index=useFlag*144;
-						int t ;
-						for(int i=0;i<12;i++)
-						{
-							for(int j=0;j<12;j++)
-							{
-								
-								t= ((10 + i)*lcdWidth+(10 + j))*2;
-								switch (keyPix[index+(i*12)+j])
-								{
-									case 0: 
-										frame[t] = (byte)0x00; 
-										frame[t+1] = (byte)0x00;
-										
-										break;
-									case 1: 
-										frame[t] = (byte)0x78; 
-										frame[t+1] = (byte)0x0F;
-										break;
-								}
-							}
-						}
-						
-						showfps+=1;
-					}
-					
-					sdl.frame.write(frame);
-					sdl.frame.flush();
-					
-					
-					 
-					
-				}
-				catch (Exception e) { 
-					System.out.println("Failed to write sdl_interface");
-					System.out.println(e.getMessage());
-					
-					new Thread(new Runnable() {  
-						@Override  
-						public void run() {  
-							// 线程执行的代码  
-							try {  
-								Thread.sleep(2000); // 休眠2秒  
-							} catch (InterruptedException e) {  
-								e.printStackTrace();  
-							}
-							
-							System.exit(0);
-						}  
-					}).start();
-					
-					Mobile.destroy();
-					sdl.stop();
-					SdlMixerManager.shutdown();
-					System.exit(0);
-				
-				}
+				paintFrame();
 			}
 		};
 
@@ -373,6 +290,116 @@ public class Anbu
 	
 	
 	
+	/**
+	 * 把当前LCD画面编码为RGB565并发送给 sdl_interface。
+	 * 游戏线程(painter)和菜单按键线程都会调用，用paintLock保证同一时间只有一帧在写管道。
+	 * 菜单打开时在游戏画面上叠加菜单。
+	 */
+	private void paintFrame()
+	{
+		synchronized (paintLock)
+		{
+			try
+			{
+				long last=fps-System.currentTimeMillis()-pretime;
+				if(last>0)
+				{
+					Thread.sleep(last);
+				}
+
+				pretime=System.currentTimeMillis();
+
+				BufferedImage image = Mobile.getPlatform().getLCD();
+
+				if(menu != null && menu.visible)
+				{
+					Graphics2D mg = menuCanvas.createGraphics();
+					mg.drawImage(image, 0, 0, null);
+					menu.draw(mg, lcdWidth, lcdHeight);
+					mg.dispose();
+					image = menuCanvas;
+				}
+
+				int[] data= new int[lcdWidth* lcdHeight];
+				byte[] frame = new byte[lcdWidth* lcdHeight * 2];
+
+				image.getRGB(0, 0, lcdWidth, lcdHeight, data, 0, lcdWidth);
+
+				byte R,G,B;
+				short tmp;
+
+				for(int i = 0; i < data.length; i++)
+				{
+					R = (byte)(data[i] >> 16);
+					G = (byte)(data[i] >> 8);
+					B = (byte)(data[i]);
+
+					R = (byte)(R>>3);
+					G = (byte)(G>>2);
+					B = (byte)(B>>3);
+					tmp = (short) ( R << 11 & 0xF800
+							| G << 5 & 0x07E0
+							| B & 0x001f);
+
+					frame[2*i]= (byte) (tmp&0x00FF);
+					frame[2*i+1]= (byte) ((tmp>>8)&0x00FF);
+				}
+
+				if(showfps<60)
+				{
+					int index=useFlag*144;
+					int t ;
+					for(int i=0;i<12;i++)
+					{
+						for(int j=0;j<12;j++)
+						{
+							t= ((10 + i)*lcdWidth+(10 + j))*2;
+							switch (keyPix[index+(i*12)+j])
+							{
+								case 0:
+									frame[t] = (byte)0x00;
+									frame[t+1] = (byte)0x00;
+									break;
+								case 1:
+									frame[t] = (byte)0x78;
+									frame[t+1] = (byte)0x0F;
+									break;
+							}
+						}
+					}
+
+					showfps+=1;
+				}
+
+				sdl.frame.write(frame);
+				sdl.frame.flush();
+			}
+			catch (Exception e)
+			{
+				System.out.println("Failed to write sdl_interface");
+				System.out.println(e.getMessage());
+
+				new Thread(new Runnable() {
+					@Override
+					public void run() {
+						try {
+							Thread.sleep(2000);
+						} catch (InterruptedException ex) {
+							ex.printStackTrace();
+						}
+
+						System.exit(0);
+					}
+				}).start();
+
+				Mobile.destroy();
+				sdl.stop();
+				SdlMixerManager.shutdown();
+				System.exit(0);
+			}
+		}
+	}
+
 	private void settingsChanged()
 	{
 		fps = Integer.parseInt(config.settings.get("fps"));
@@ -390,6 +417,9 @@ public class Anbu
 		else if(phone.equals("e")) { /* Mobile.nokia = true;  useNokiaControls = true; */ useFlag=2;}
 		else if(phone.equals("s")) { /* Mobile.siemens = true; useSiemensControls = true; */ useFlag=3;}
 		else if(phone.equals("m")) { /* Mobile.motorola = true; useMotorolaControls = true; */ useFlag=4;}
+
+		String dpad = config.settings.get("dpad");
+		dpadNav = "nav".equals(dpad);
 	}
 	
 
@@ -494,10 +524,25 @@ public class Anbu
 							{
 								case 0: //按键模式
 									code = (din[1]<<24) | (din[2]<<16) | (din[3]<<8) | din[4];
-									
+
+									boolean keypressed = (din[0] % 2 != 0);
+
+									// MENU键(SDLK_F1): 呼出/关闭系统菜单
+									if(code == 0x4000003A)
+									{
+										if(keypressed && menu != null) { menu.toggle(); }
+										return;
+									}
+
+									// 菜单打开时，按键全部交给菜单处理，不转发给游戏
+									if(menu != null && menu.handleKey(code, keypressed))
+									{
+										return;
+									}
+
 									//System.out.println(" ("+code+") =============== Key");
-									
-									mobikey = getMobileKey(code); 
+
+									mobikey = getMobileKey(code);
 									break;
 								case 1://触屏模式
 									
@@ -576,6 +621,22 @@ public class Anbu
 	private int getMobileKey(int keycode)
 	{
 		//System.out.println("按键码:"+keycode);
+
+		// 标准模式(p)下十字键映射为手机导航键（-1/-2/-3/-4, OK=-5）
+		// 斜方向需要两个方向键同时按下，数字键2468模式下游戏常只认单键
+		if(useFlag==0 && dpadNav)
+		{
+			switch(keycode)
+			{
+				case 0x40000052: return Mobile.NOKIA_UP;
+				case 0x40000051: return Mobile.NOKIA_DOWN;
+				case 0x40000050: return Mobile.NOKIA_LEFT;
+				case 0x4000004F: return Mobile.NOKIA_RIGHT;
+				case 0x0D: return Mobile.NOKIA_SOFT3;   // OK键=导航中键(FIRE)
+				case 0x6F: return Mobile.NOKIA_SOFT3;
+			}
+		}
+
 		if(useFlag==1)
 		{
 			switch(keycode)
@@ -678,7 +739,7 @@ public class Anbu
 				else
 					soundLevel=0;
 				//System.out.println("音量:"+soundLevel);
-				//Audio.setVol(soundLevel);
+				SdlMixerManager.setMasterVolume(soundLevel);
 				config.settings.put("sound", String.valueOf(soundLevel));
 				config.saveConfig();
 				break;
@@ -688,6 +749,7 @@ public class Anbu
 				else
 					soundLevel=100;
 				//Audio.setVol(soundLevel);
+				SdlMixerManager.setMasterVolume(soundLevel);
 				config.settings.put("sound", String.valueOf(soundLevel));
 				config.saveConfig();
 				//System.out.println("音量:"+soundLevel);

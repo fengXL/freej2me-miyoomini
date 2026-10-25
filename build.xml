@@ -29,7 +29,9 @@
 	>
 	<compilerarg value="-Xlint:unchecked"/>
 	<compilerarg value="-Xlint:deprecation"/>
-	
+	<compilerarg value="--release"/>
+	<compilerarg value="17"/>
+
 	</javac>
 
 

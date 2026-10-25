@@ -40,34 +40,34 @@ JNIEXPORT jint JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPlayMus
 /*
  * Class:     org_recompile_mobile_SdlMixerManager
  * Method:    sdlMixerPauseMusic
- * Signature: ()V
+ * Signature: (J)V
  */
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPauseMusic
-  (JNIEnv *, jobject);
+  (JNIEnv *, jobject, jlong);
 
 /*
  * Class:     org_recompile_mobile_SdlMixerManager
  * Method:    sdlMixerResumeMusic
- * Signature: ()V
+ * Signature: (J)V
  */
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerResumeMusic
-  (JNIEnv *, jobject);
+  (JNIEnv *, jobject, jlong);
 
 /*
  * Class:     org_recompile_mobile_SdlMixerManager
  * Method:    sdlMixerStopMusic
- * Signature: ()V
+ * Signature: (J)V
  */
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerStopMusic
-  (JNIEnv *, jobject);
+  (JNIEnv *, jobject, jlong);
 
 /*
  * Class:     org_recompile_mobile_SdlMixerManager
  * Method:    sdlMixerIsPlaying
- * Signature: ()Z
+ * Signature: (J)Z
  */
 JNIEXPORT jboolean JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerIsPlaying
-  (JNIEnv *, jobject);
+  (JNIEnv *, jobject, jlong);
 
 /*
  * Class:     org_recompile_mobile_SdlMixerManager
@@ -106,19 +106,22 @@ JNIEXPORT jlong JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerLoadWa
 JNIEXPORT jint JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPlayWav
   (JNIEnv *env, jobject obj, jlong musicHandle, jint loops);
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerPauseWav
-  (JNIEnv *env, jobject obj);
+  (JNIEnv *env, jobject obj, jlong musicHandle);
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerResumeWav
-  (JNIEnv *env, jobject obj);
+  (JNIEnv *env, jobject obj, jlong musicHandle);
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerStopWav
-  (JNIEnv *env, jobject obj);
+  (JNIEnv *env, jobject obj, jlong musicHandle);
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerFreeWav
   (JNIEnv *env, jobject obj, jlong musicHandle);
 JNIEXPORT jboolean JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerIsPlayingWav
-  (JNIEnv *env, jobject obj);
+  (JNIEnv *env, jobject obj, jlong musicHandle);
 
 JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerSetVolumeWav
-  (JNIEnv *env, jobject obj, jint volume);
-  
+  (JNIEnv *env, jobject obj, jlong musicHandle, jint volume);
+
+JNIEXPORT void JNICALL Java_org_recompile_mobile_SdlMixerManager_sdlMixerUpdate
+  (JNIEnv *env, jobject obj);
+
 JNIEXPORT jint JNICALL  JNI_OnLoad(JavaVM* vm, void* reserved);
 JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved);
 

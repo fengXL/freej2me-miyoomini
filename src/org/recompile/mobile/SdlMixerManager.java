@@ -3,7 +3,7 @@ import org.recompile.mobile.PlatformPlayer;
 
 public class SdlMixerManager{
     // ========== Native方法声明 ==========
-    
+
     /**
      * 初始化SDL2和SDL2_mixer
      * @param frequency 采样率 (如44100)
@@ -13,103 +13,115 @@ public class SdlMixerManager{
      * @return 0=成功, -1=失败
      */
     public static native int sdlMixerInit(int frequency, int format, int channels, int chunksize);
-    
+
     public static native int sdlHapticInit();
 	public static native void sdlHaptic(int duration);
 
     /**
-     * 加载MIDI文件
-     * @param filePath MIDI文件路径
-     * @return 音乐句柄ID (>=0), -1=失败
+     * 加载音频文件到music通道（MIDI/MP3/OGG等流式音频，全局单流）
+     * @param filePath 文件路径
+     * @return 句柄 (>=0), -1=失败
      */
     public native long sdlMixerLoadMidi(String filePath, PlatformPlayer.sdlPlayer player);
-	
+
 	public native long sdlMixerLoadWav(String filePath);
-    
+
     /**
-     * 播放音乐
+     * 播放音乐（music通道全局单流，新播放替换旧播放）
      * @param musicHandle 音乐句柄
      * @param loops 循环次数 (-1=无限循环)
      * @return 0=成功, -1=失败
      */
     public native int sdlMixerPlayMusic(long musicHandle, int loops);
-	
+
+	/**
+	 * 播放音效（每个句柄独占一个通道，多音效可重叠，互不打断）
+	 */
 	public native int sdlMixerPlayWav(long musicHandle, int loops);
-    
+
     /**
-     * 暂停音乐
+     * 暂停（只作用于属于该句柄的流/通道）
      */
-    public native void sdlMixerPauseMusic();//对应stop
-	
-	public native void sdlMixerPauseWav();
-    
+    public native void sdlMixerPauseMusic(long musicHandle);
+
+	public native void sdlMixerPauseWav(long musicHandle);
+
     /**
      * 恢复播放
      */
-    public native void sdlMixerResumeMusic();
-	
-	public native void sdlMixerResumeWav();
-    
+    public native void sdlMixerResumeMusic(long musicHandle);
+
+	public native void sdlMixerResumeWav(long musicHandle);
+
     /**
-     * 停止音乐
+     * 停止
      */
-    public native void sdlMixerStopMusic();
-	
-	public native void sdlMixerStopWav();
-    
+    public native void sdlMixerStopMusic(long musicHandle);
+
+	public native void sdlMixerStopWav(long musicHandle);
+
     /**
      * 检查是否正在播放
-     * @return true=正在播放
      */
-    public native boolean sdlMixerIsPlaying();
-	public native boolean sdlMixerIsPlayingWav();
-    
+    public native boolean sdlMixerIsPlaying(long musicHandle);
+	public native boolean sdlMixerIsPlayingWav(long musicHandle);
+
     /**
-     * 设置音量 (0-128)
-     * @param volume 音量值
+     * 设置音量 (0-100)
      */
     public native void sdlMixerSetVolume(int volume);
-	public native void sdlMixerSetVolumeWav(int volume);
-    
+	public native void sdlMixerSetVolumeWav(long musicHandle, int volume);
+
     /**
      * 获取当前音量
-     * @return 音量值 (0-128)
+     * @return 音量值
      */
     public native int sdlMixerGetVolume();
-    
+
     /**
-     * 卸载音乐资源
-     * @param musicHandle 音乐句柄
+     * 卸载资源
      */
     public native void sdlMixerFreeMusic(long musicHandle);
-	
+
 	public native void sdlMixerFreeWav(long musicHandle);
-    
+
     /**
      * 关闭SDL2_mixer
      */
     public static native void sdlMixerQuit();
-    
+
+    /**
+     * 轮询music自然播完事件。native的musicFinished回调运行在SDL音频线程，
+     * 不能直接回调Java（游戏监听器里再调start会死锁整个音频线程），
+     * 只置标志位，由本方法在普通Java线程里转发END_OF_MEDIA。
+     */
+    public native void sdlMixerUpdate();
+
     // ========== Java封装方法 ==========
-    
-    private static boolean initialized = false;
-    private long currentMusicHandle = 0;
-	private int loops = 0;
-    
+
+    private static volatile boolean initialized = false;
+
+    // 全局音量（0-100），在init后以及菜单调节时应用
+    private static volatile int masterVolume = 100;
+
+    // music播完事件轮询线程
+    private static Thread pollThread = null;
+
     /**
      * 全局初始化音频系统
      */
-    public static boolean init() {
+    public static synchronized boolean init() {
         if (initialized) {
-            System.out.println("⚠ [java]已经初始化过了");
             return true;
         }
-        
+
         // SDL_AUDIO_S16SYS = 32784
         int result = sdlMixerInit(44100, 32784, 2, 4096);
         if (result == 0) {
             initialized = true;
             System.out.println("✓ [java]SDL2_mixer初始化成功");
+            applyMasterVolume();
+            startPollThread();
             return true;
         } else {
             System.err.println("❌ [java]SDL2_mixer初始化失败");
@@ -117,9 +129,49 @@ public class SdlMixerManager{
         }
     }
 
+    /**
+     * 轮询native侧music自然播完标志并转发END_OF_MEDIA（普通线程，安全调播放API）
+     */
+    private static void startPollThread() {
+        final SdlMixerManager m = new SdlMixerManager();
+        pollThread = new Thread(new Runnable() {
+            public void run() {
+                while (initialized) {
+                    try { Thread.sleep(50); } catch (InterruptedException e) { return; }
+                    try { m.sdlMixerUpdate(); } catch (Throwable t) { }
+                }
+            }
+        }, "SdlMixerEomPoll");
+        pollThread.setDaemon(true);
+        pollThread.start();
+    }
+
+    /**
+     * 设置全局音量（音乐通道立即生效；音效通道在下次播放时应用）
+     */
+    public static void setMasterVolume(int volume) {
+        if (volume < 0) volume = 0;
+        if (volume > 100) volume = 100;
+        masterVolume = volume;
+        if (initialized) {
+            applyMasterVolume();
+        }
+    }
+
+    public static int getMasterVolume() {
+        return masterVolume;
+    }
+
+    private static void applyMasterVolume() {
+        try {
+            SdlMixerManager m = new SdlMixerManager();
+            m.sdlMixerSetVolume(masterVolume);
+        } catch (Throwable e) { }
+    }
+
     //初始化震动子系统
 	public static boolean initHaptic() {
-        
+
         int result = sdlHapticInit();
         if (result == 0) {
             System.out.println("✓ [java]SDL2_Haptic初始化成功");
@@ -129,86 +181,27 @@ public class SdlMixerManager{
             return false;
         }
     }
-	
+
 	public static void vibrate(int duration) {
-        
+
         sdlHaptic(duration);
     }
-    
-    /**
-     * 播放MIDI文件
-     */
-    public boolean playMidi(String filePath, int loops) {//对应start
-        if (!initialized) {
-            System.err.println("❌ [java]未初始化，请先调用init()");
-            return false;
-        }
-        
-        if(currentMusicHandle==0)
-		{
-			currentMusicHandle = sdlMixerLoadMidi(filePath, null);
-		}
-        
-        if (currentMusicHandle == -1) {
-            System.err.println("❌ [java]加载MIDI文件失败: " + filePath);
-            return false;
-        }
-        
-        int result = sdlMixerPlayMusic(currentMusicHandle, loops);
-        if (result == 0) {
-            System.out.println("🎵 开始播放: " + filePath);
-            return true;
-        } else {
-            System.err.println("❌ 播放失败");
-            return false;
-        }
-    }
-	
-	public void deallocate()//释放内存
-	{
-		if (currentMusicHandle != 0) {
-			sdlMixerStopMusic();//先close
-            sdlMixerFreeMusic(currentMusicHandle);//再释放
-            currentMusicHandle = 0;
-        }
-	}
-    
+
     /**
      * 全局清理退出
      */
     public static void shutdown() {
 		if(initialized)
 		{
-			sdlMixerQuit();
 			initialized = false;
-			
+			// 先停轮询线程，避免sdlMixerQuit清理映射表时它还在回调
+			if (pollThread != null) {
+				pollThread.interrupt();
+				try { pollThread.join(500); } catch (InterruptedException e) { }
+				pollThread = null;
+			}
+			sdlMixerQuit();
 		}
         System.out.println("✓ [java]SDL2_mixer已关闭");
-    }
-    
-    // ========== 测试主方法 ==========
-    
-    public static void main(String[] args) {
-        SdlMixerManager manager = new SdlMixerManager();
-        
-        if (!manager.init()) {
-            System.exit(1);
-        }
-        
-        // 播放测试
-        if (args.length > 0) {
-            manager.playMidi(args[0], 0);
-            
-            // 等待播放完成
-            while (manager.sdlMixerIsPlaying()) {
-                try {
-                    Thread.sleep(100);
-                } catch (InterruptedException e) {
-                    break;
-                }
-            }
-        }
-        
-        manager.shutdown();
     }
 }

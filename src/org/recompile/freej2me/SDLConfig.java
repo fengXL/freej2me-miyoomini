@@ -78,6 +78,7 @@ public class SDLConfig
 				settings.put("sound", "100");
 				settings.put("phone", "p");
 				settings.put("fps", "60");
+				settings.put("dpad", "num");
 				saveConfig();
 			}
 		}
@@ -110,6 +111,7 @@ public class SDLConfig
 			if(!settings.containsKey("sound")) { settings.put("sound", "100"); }
 			if(!settings.containsKey("phone")) { settings.put("phone", "p"); }
 			if(!settings.containsKey("fps")) { settings.put("fps", "60"); }
+			if(!settings.containsKey("dpad")) { settings.put("dpad", "num"); }
 
 			int w = Integer.parseInt(settings.get("width"));
 			int h = Integer.parseInt(settings.get("height"));

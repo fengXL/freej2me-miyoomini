@@ -1,2 +1,4 @@
 build/
 *.o
+cpp/native/*.so
+cpp/sdl2/sdl_interface

@@ -83,9 +83,37 @@ public final class Manager
 		return new String[]{"device", "file", "http"};
 	}
 	
+	// 上一个合成音的chunk句柄：每次playTone都新load一个chunk，不释放会把音效通道漏光
+	private static long lastToneHandle = 0;
+
 	public static void playTone(int note, int duration, int volume)
 	{
 		System.out.println("Play Tone");
+		try
+		{
+			byte[] wav = org.recompile.mobile.AudioUtil.synthesizeWav(
+					org.recompile.mobile.AudioUtil.noteToFreq(note), duration, volume);
+			String path = org.recompile.mobile.AudioUtil.writeCacheFile("./rms/_tone", wav, ".wav");
+			if (path == null) { return; }
+
+			org.recompile.mobile.SdlMixerManager.init();
+			org.recompile.mobile.SdlMixerManager m = new org.recompile.mobile.SdlMixerManager();
+			long handle = m.sdlMixerLoadWav(path);
+			if (handle > 0)
+			{
+				if (lastToneHandle != 0 && lastToneHandle != handle)
+				{
+					m.sdlMixerStopWav(lastToneHandle);
+					m.sdlMixerFreeWav(lastToneHandle);
+				}
+				lastToneHandle = handle;
+				m.sdlMixerPlayWav(handle, 0);
+			}
+		}
+		catch (Throwable t)
+		{
+			System.out.println("Play Tone failed: " + t.getMessage());
+		}
 	}
 
 }
